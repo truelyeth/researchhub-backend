@@ -358,13 +358,31 @@ def check_open_bounties():
 
     expired_bounties = open_bounties.filter(time_left__lte=timedelta(days=0))
     for bounty in expired_bounties.iterator():
+        bounty.set_review_period_status()
+        bounty.unified_document.update_filters(
+            (FILTER_BOUNTY_OPEN,)
+        )
+    
+    # Check bounties in review period
+    review_bounties = Bounty.objects.filter(
+        status=Bounty.REVIEW_PERIOD,
+        parent__isnull=True
+    ).annotate(
+        review_time_left=Cast(
+            (F("expiration_date") + timedelta(days=1) * F("review_period_days")) - datetime.now(pytz.UTC),
+            DurationField(),
+        )
+    )
+    
+    # Process bounties that have passed their review period
+    expired_review_bounties = review_bounties.filter(review_time_left__lte=timedelta(days=0))
+    for bounty in expired_review_bounties.iterator():
         refund_status = bounty.close(Bounty.EXPIRED)
         bounty.unified_document.update_filters(
-            (FILTER_BOUNTY_EXPIRED, FILTER_BOUNTY_OPEN)
+            (FILTER_BOUNTY_EXPIRED,)
         )
         if refund_status is False:
-            ids = expired_bounties.values_list("id", flat=True)
-            log_info(f"Failed to refund bounties: {ids}")
+            log_info(f"Failed to refund bounty: {bounty.id}")
 
 
 @app.task
