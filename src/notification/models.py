@@ -28,6 +28,8 @@ class Notification(models.Model):
     BOUNTY_HUB_EXPIRING_SOON = "BOUNTY_HUB_EXPIRING_SOON"
     DIS_ON_BOUNTY = "DIS_ON_BOUNTY"
     BOUNTY_PAYOUT = "BOUNTY_PAYOUT"
+    BOUNTY_REVIEW_PERIOD_STARTED = "BOUNTY_REVIEW_PERIOD_STARTED"
+    BOUNTY_REVIEW_PERIOD_ENDING_SOON = "BOUNTY_REVIEW_PERIOD_ENDING_SOON"
     PAPER_CLAIMED = "PAPER_CLAIMED"
     ACCOUNT_VERIFIED = "ACCOUNT_VERIFIED"
     FUNDRAISE_PAYOUT = "FUNDRAISE_PAYOUT"
@@ -55,6 +57,8 @@ class Notification(models.Model):
         (COMMENT_USER_MENTION, COMMENT_USER_MENTION),
         (BOUNTY_PAYOUT, BOUNTY_PAYOUT),
         (BOUNTY_FOR_YOU, BOUNTY_FOR_YOU),
+        (BOUNTY_REVIEW_PERIOD_STARTED, BOUNTY_REVIEW_PERIOD_STARTED),
+        (BOUNTY_REVIEW_PERIOD_ENDING_SOON, BOUNTY_REVIEW_PERIOD_ENDING_SOON),
         (ACCOUNT_VERIFIED, ACCOUNT_VERIFIED),
         (PAPER_CLAIMED, PAPER_CLAIMED),
         (FUNDRAISE_PAYOUT, FUNDRAISE_PAYOUT),
@@ -572,4 +576,43 @@ class Notification(models.Model):
                 "type": "text",
                 "value": f" has been fulfilled and you have received {amount} RSC",
             },
+        ], base_url
+
+    def _format_bounty_review_period_started(self):
+        bounty = self.item
+        unified_document = bounty.unified_document
+        document = unified_document.get_document()
+        doc_title = self._truncate_title(document.title)
+        base_url = unified_document.frontend_view_link()
+        
+        # Different messages for creator vs submitter
+        if self.recipient == bounty.created_by:
+            # Message for bounty creator
+            return [
+                {"type": "text", "value": "Your bounty has closed - you have "},
+                {"type": "text", "value": "10 days ", "extra": '["bold"]'},
+                {"type": "text", "value": "to select the awardees. "},
+                {"type": "link", "value": doc_title, "link": base_url, "extra": '["link"]'},
+            ], base_url
+        else:
+            # Message for solution submitter
+            return [
+                {"type": "text", "value": "The bounty you answered has ended. The creator has up to "},
+                {"type": "text", "value": "10 days ", "extra": '["bold"]'},
+                {"type": "text", "value": "to award the submissions. "},
+                {"type": "link", "value": doc_title, "link": base_url, "extra": '["link"]'},
+            ], base_url
+
+    def _format_bounty_review_period_ending_soon(self):
+        bounty = self.item
+        unified_document = bounty.unified_document
+        document = unified_document.get_document()
+        doc_title = self._truncate_title(document.title)
+        base_url = unified_document.frontend_view_link()
+        
+        return [
+            {"type": "text", "value": "Your bounty review period ends in "},
+            {"type": "text", "value": "24 hours! ", "extra": '["bold", "warning_color"]'},
+            {"type": "text", "value": "Award your bounty now or it will be automatically refunded. "},
+            {"type": "link", "value": doc_title, "link": base_url, "extra": '["link"]'},
         ], base_url

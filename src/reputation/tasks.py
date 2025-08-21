@@ -362,6 +362,9 @@ def check_open_bounties():
         bounty.unified_document.update_filters(
             (FILTER_BOUNTY_OPEN,)
         )
+        
+        # Send notifications when entering review period
+        send_bounty_review_period_started_notification.delay(bounty.id)
     
     # Check bounties in review period
     review_bounties = Bounty.objects.filter(
@@ -373,6 +376,26 @@ def check_open_bounties():
             DurationField(),
         )
     )
+    
+    # Send 24-hour reminder for bounties ending soon
+    upcoming_review_endings = review_bounties.filter(
+        review_time_left__gt=timedelta(days=0), review_time_left__lte=timedelta(days=1)
+    )
+    for bounty in upcoming_review_endings.iterator():
+        # Only send reminder if bounty hasn't been awarded yet
+        has_awards = Bounty.objects.filter(parent=bounty).exists()
+        
+        if not has_awards:
+            # Check if we already sent a reminder notification
+            existing_reminder = Notification.objects.filter(
+                object_id=bounty.id,
+                content_type=ContentType.objects.get_for_model(Bounty),
+                notification_type=Notification.BOUNTY_REVIEW_PERIOD_ENDING_SOON,
+                recipient=bounty.created_by
+            ).exists()
+            
+            if not existing_reminder:
+                send_bounty_review_period_ending_notification.delay(bounty.id)
     
     # Process bounties that have passed their review period
     expired_review_bounties = review_bounties.filter(review_time_left__lte=timedelta(days=0))
@@ -537,3 +560,160 @@ def burn_revenue_rsc(network="BASE"):
     Weekly task to burn ResearchCoin from the revenue account.
     """
     return WalletService.burn_revenue_rsc(network)
+
+
+@app.task
+def send_bounty_review_period_started_notification(bounty_id: int):
+    """
+    Send notifications when a bounty enters review period.
+    Notifies both the bounty creator and all solution submitters.
+    """
+    try:
+        bounty = Bounty.objects.get(id=bounty_id)
+        bounty_creator = bounty.created_by
+        unified_doc = bounty.unified_document
+        
+        # Notify the bounty creator
+        creator_notification = Notification.objects.create(
+            item=bounty,
+            action_user=bounty_creator,
+            recipient=bounty_creator,
+            unified_document=unified_doc,
+            notification_type=Notification.BOUNTY_REVIEW_PERIOD_STARTED,
+        )
+        creator_notification.send_notification()
+        
+        # Send email to creator
+        creator_subject = "Your ResearchHub Bounty Has Closed - 10 Days to Award"
+        creator_context = {**base_email_context}
+        creator_context["action"] = {
+            "message": f"Your bounty has closed and entered a 10-day review period. Please review submissions and award the bounty before it's automatically refunded.",
+            "frontend_view_link": unified_doc.frontend_view_link(),
+        }
+        creator_context["subject"] = "Your Bounty Has Closed"
+        send_email_message(
+            [bounty_creator.email],
+            "general_email_message.txt",
+            creator_subject,
+            creator_context,
+            html_template="general_email_message.html",
+        )
+        
+        # Notify all solution submitters
+        from researchhub_comment.models import RhCommentModel as Comment, RhCommentThreadModel
+        
+        solution_authors = set()
+        
+        # For peer review bounties, get reviewers from the document's review threads
+        if bounty.bounty_type == 'REVIEW' and bounty.unified_document:
+            # Get the actual document object (Paper, Post, etc)
+            actual_document = bounty.unified_document.get_document()
+            if actual_document:
+                from django.contrib.contenttypes.models import ContentType
+                doc_content_type = ContentType.objects.get_for_model(actual_document)
+                
+                # Get all review comments on the actual document
+                review_threads = RhCommentThreadModel.objects.filter(
+                    content_type=doc_content_type,
+                    object_id=actual_document.id
+                )
+                for thread in review_threads:
+                    thread_authors = Comment.objects.filter(
+                        thread=thread
+                    ).exclude(
+                        created_by=bounty_creator
+                    ).values_list('created_by', flat=True).distinct()
+                    solution_authors.update(thread_authors)
+        
+        # For other bounty types, get comments on the bounty thread
+        if bounty.item and hasattr(bounty.item, 'thread'):
+            thread_authors = Comment.objects.filter(
+                thread=bounty.item.thread
+            ).exclude(
+                created_by=bounty_creator
+            ).values_list('created_by', flat=True).distinct()
+            solution_authors.update(thread_authors)
+            
+        # Send notification to each solution submitter
+        for author_id in solution_authors:
+                try:
+                    author_user = User.objects.get(id=author_id)
+                    submitter_notification = Notification.objects.create(
+                        item=bounty,
+                        action_user=bounty_creator,
+                        recipient=author_user,
+                        unified_document=unified_doc,
+                        notification_type=Notification.BOUNTY_REVIEW_PERIOD_STARTED,
+                    )
+                    submitter_notification.send_notification()
+                    
+                    # Send email to submitter
+                    submitter_subject = "Bounty Review Period Has Started"
+                    submitter_context = {**base_email_context}
+                    submitter_context["action"] = {
+                        "message": "The bounty you submitted a solution for has ended. The creator has 10 days to review and award submissions.",
+                        "frontend_view_link": unified_doc.frontend_view_link(),
+                    }
+                    submitter_context["subject"] = "Bounty Review Period Started"
+                    send_email_message(
+                        [author_user.email],
+                        "general_email_message.txt",
+                        submitter_subject,
+                        submitter_context,
+                        html_template="general_email_message.html",
+                    )
+                except User.DoesNotExist:
+                    continue
+                    
+    except Bounty.DoesNotExist:
+        log_error(f"Bounty {bounty_id} not found for review period notification")
+    except Exception as e:
+        log_error(e, f"Failed to send review period notification for bounty {bounty_id}")
+
+
+@app.task
+def send_bounty_review_period_ending_notification(bounty_id: int):
+    """
+    Send notification 24 hours before review period ends.
+    Only sent to bounty creator if they haven't awarded the bounty yet.
+    """
+    try:
+        bounty = Bounty.objects.get(id=bounty_id)
+        bounty_creator = bounty.created_by
+        unified_doc = bounty.unified_document
+        
+        # Double-check that bounty hasn't been awarded
+        has_awards = Bounty.objects.filter(parent=bounty).exists()
+        if has_awards:
+            return  # Don't send reminder if already awarded
+        
+        # Create notification for creator
+        notification = Notification.objects.create(
+            item=bounty,
+            action_user=bounty_creator,
+            recipient=bounty_creator,
+            unified_document=unified_doc,
+            notification_type=Notification.BOUNTY_REVIEW_PERIOD_ENDING_SOON,
+        )
+        notification.send_notification()
+        
+        # Send urgent email to creator
+        subject = "⚠️ Your Bounty Review Period Ends in 24 Hours!"
+        context = {**base_email_context}
+        context["action"] = {
+            "message": "Your bounty will be automatically refunded in 24 hours if not awarded. Award your bounty now to reward the best submissions.",
+            "frontend_view_link": unified_doc.frontend_view_link(),
+        }
+        context["subject"] = "Urgent: Award Your Bounty"
+        send_email_message(
+            [bounty_creator.email],
+            "general_email_message.txt",
+            subject,
+            context,
+            html_template="general_email_message.html",
+        )
+        
+    except Bounty.DoesNotExist:
+        log_error(f"Bounty {bounty_id} not found for ending notification")
+    except Exception as e:
+        log_error(e, f"Failed to send ending notification for bounty {bounty_id}")
