@@ -1,12 +1,27 @@
 from functools import reduce
 
-from django.db.models import DecimalField, IntegerField, Q, Sum
+from django.contrib.contenttypes.models import ContentType
+from django.db.models import (
+    DecimalField,
+    Exists,
+    IntegerField,
+    OuterRef,
+    Q,
+    Sum,
+    Case,
+    When,
+    F,
+    Value,
+)
 from django.db.models.functions import Cast, Coalesce
 from django_filters import DateTimeFilter
 from django_filters import rest_framework as filters
 
-from reputation.models import Bounty
+from purchase.models import Purchase
+from reputation.models import Bounty, BountySolution
+from user.models import User, UserVerification
 from researchhub_access_group.constants import PRIVATE, PUBLIC, WORKSPACE
+from researchhub_comment.scoring import CommentScorer
 from researchhub_comment.constants.rh_comment_thread_types import (
     AUTHOR_UPDATE,
     GENERIC_COMMENT,
@@ -131,10 +146,74 @@ class RHCommentFilter(filters.FilterSet):
         )
         return queryset
 
+    def _annotate_academic_score_components(self, qs):
+        qs = qs.annotate(
+            tip_amount=Coalesce(
+                Sum(
+                    Cast("purchases__amount", DecimalField(max_digits=19, decimal_places=10)),
+                    filter=Q(
+                        purchases__purchase_type=Purchase.BOOST,
+                        purchases__paid_status=Purchase.PAID,
+                    ),
+                ),
+                Value(0),
+                output_field=DecimalField(max_digits=19, decimal_places=10),
+            )
+        )
+        
+        qs = qs.annotate(
+            bounty_award_amount=Coalesce(
+                Sum(
+                    "bounty_solution__awarded_amount",
+                    filter=Q(bounty_solution__status=BountySolution.Status.AWARDED),
+                ),
+                Value(0),
+                output_field=DecimalField(max_digits=19, decimal_places=10),
+            )
+        )
+        
+        qs = qs.annotate(
+            is_verified_user=Exists(
+                User.objects.filter(
+                    id=OuterRef("created_by_id"),
+                    userverification__status=UserVerification.Status.APPROVED
+                )
+            )
+        )
+        
+        return qs
+
+    def _apply_academic_ordering(self, qs):
+        qs = self._annotate_academic_score_components(qs)
+        qs = qs.select_related(
+            "created_by",
+            "created_by__userverification"
+        ).prefetch_related(
+            "purchases",
+            "bounty_solution"
+        )
+        
+        comments = list(qs)
+        
+        comment_scores = []
+        for comment in comments:
+            score_data = CommentScorer.calculate_score(comment)
+            comment.academic_score_calculated = score_data["score"]
+            comment_scores.append((comment.id, score_data["score"]))
+        
+        comment_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        sorted_ids = [item[0] for item in comment_scores]
+        
+        if not sorted_ids:
+            return qs.none()
+        
+        preserved = Case(
+            *[When(pk=pk, then=pos) for pos, pk in enumerate(sorted_ids)]
+        )
+        return qs.filter(id__in=sorted_ids).order_by(preserved)
+
     def _is_on_child_queryset(self):
-        # This checks whether we are filtering on the comment's children
-        # because we don't want the related filters to be called
-        # on the base comments, only children
         instance_class_name = self.queryset.__class__.__name__
         if instance_class_name == "RelatedManager":
             return True
@@ -178,33 +257,47 @@ class RHCommentFilter(filters.FilterSet):
 
     def ordering_filter(self, qs, name, value):
         if value == BEST:
-            qs = self._annotate_bounty_sum(
-                qs, annotation_filters=[{"bounties__status": Bounty.OPEN}]
-            )
-            qs = qs.annotate(
-                accepted_answer=Cast("is_accepted_answer", output_field=IntegerField())
-            )
-            keys = self._get_ordering_keys(
-                [
-                    "bounty_sum",
-                    "accepted_answer",
-                    "score",
-                    "created_date",
-                ]
-            )
-            qs = qs.order_by(*keys)
+            qs = self._apply_academic_ordering(qs)
         elif value == TOP:
-            keys = self._get_ordering_keys(["score"])
-            qs = qs.order_by(*keys)
+            qs = self._apply_academic_ordering(qs)
         elif value == BOUNTY:
             qs = self._annotate_bounty_sum(qs).filter(bounty_sum__gt=0)
-            keys = self._get_ordering_keys(
-                [
-                    "bounty_sum",
-                    "score",
-                    "created_date",
-                ]
+            
+            comment_ct = ContentType.objects.get_for_model(RhCommentModel)
+            
+            qs = qs.annotate(
+                has_open_bounty=Exists(
+                    Bounty.objects.filter(
+                        item_content_type=comment_ct,
+                        item_object_id=OuterRef("id"),
+                        status=Bounty.OPEN,
+                    )
+                )
             )
+            
+            qs = self._apply_academic_ordering(qs)
+            
+            sorted_comments = list(qs)
+            
+            open_bounty_comments = []
+            closed_bounty_comments = []
+            
+            for comment in sorted_comments:
+                if getattr(comment, "has_open_bounty", False):
+                    open_bounty_comments.append(comment.id)
+                else:
+                    closed_bounty_comments.append(comment.id)
+            
+            final_order = open_bounty_comments + closed_bounty_comments
+            
+            if not final_order:
+                return qs.none()
+            
+            preserved = Case(
+                *[When(pk=pk, then=pos) for pos, pk in enumerate(final_order)]
+            )
+            qs = qs.filter(id__in=final_order).order_by(preserved)
+            
         elif value == CREATED_DATE:
             keys = self._get_ordering_keys(["created_date"])
             qs = qs.order_by(*keys)
