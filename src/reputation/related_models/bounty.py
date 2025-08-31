@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import List, TypedDict
 
 import pytz
+from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
@@ -10,7 +11,6 @@ from django.db.models import Sum
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from reputation.constants.bounty import DEFAULT_BOUNTY_REVIEW_PERIOD_DAYS
 from reputation.related_models.escrow import Escrow
 from reputation.related_models.score import Score
 from utils.models import DefaultModel
@@ -50,10 +50,6 @@ class Bounty(DefaultModel):
     expiration_date = models.DateTimeField(
         null=True,
         default=get_default_expiration_date,  # Can be null for author claim bounties
-    )
-    review_period_days = models.IntegerField(
-        default=DEFAULT_BOUNTY_REVIEW_PERIOD_DAYS,
-        help_text="Days after expiration to review and award bounty"
     )
     item_content_type = models.ForeignKey(
         ContentType, on_delete=models.CASCADE, related_name="item_bounty"
@@ -101,6 +97,12 @@ class Bounty(DefaultModel):
     def __str__(self):
         return f"Bounty: {self.id}"
 
+    @property
+    def review_period_end_date(self):
+        if self.status == self.REVIEW_PERIOD and self.expiration_date:
+            return self.expiration_date + timedelta(days=settings.BOUNTY_REVIEW_PERIOD_DAYS)
+        return None
+
     def is_open(self):
         return self.status == Bounty.OPEN
 
@@ -130,7 +132,10 @@ class Bounty(DefaultModel):
         self.set_status(self.CLOSED, should_save=should_save)
 
     def set_review_period_status(self, should_save=True):
-        self.set_status(self.REVIEW_PERIOD, should_save=should_save)
+        self.status = self.REVIEW_PERIOD
+        
+        if should_save:
+            self.save(update_fields=['status'])
 
     def get_bounty_proportions(self):
         children = self.children

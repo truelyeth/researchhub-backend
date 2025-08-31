@@ -452,14 +452,14 @@ class Notification(models.Model):
         if self.recipient == bounty.created_by:
             return [
                 {"type": "text", "value": "Your bounty has closed - you have "},
-                {"type": "text", "value": f"{bounty.review_period_days} days ", "extra": '["bold"]'},
+                {"type": "text", "value": f"{self.extra.get('review_period_days', 10)} days ", "extra": '["bold"]'},
                 {"type": "text", "value": "to select the awardees. "},
                 {"type": "link", "value": doc_title, "link": base_url, "extra": '["link"]'},
             ], base_url
         else:
             return [
                 {"type": "text", "value": "The bounty you answered has ended. The creator has up to "},
-                {"type": "text", "value": f"{bounty.review_period_days} days ", "extra": '["bold"]'},
+                {"type": "text", "value": f"{self.extra.get('review_period_days', 10)} days ", "extra": '["bold"]'},
                 {"type": "text", "value": "to award the submissions. "},
                 {"type": "link", "value": doc_title, "link": base_url, "extra": '["link"]'},
             ], base_url

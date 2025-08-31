@@ -16,6 +16,7 @@ from utils.http import get_user_from_request
 
 class BountySerializer(serializers.ModelSerializer):
     review_period_end_date = serializers.SerializerMethodField()
+    review_period_days = serializers.SerializerMethodField()
 
     class Meta:
         model = Bounty
@@ -25,10 +26,12 @@ class BountySerializer(serializers.ModelSerializer):
             "updated_date",
         ]
 
+    def get_review_period_days(self, obj):
+        from django.conf import settings
+        return settings.BOUNTY_REVIEW_PERIOD_DAYS
+    
     def get_review_period_end_date(self, obj):
-        if obj.status == 'REVIEW_PERIOD' and obj.expiration_date:
-            return obj.expiration_date + timedelta(days=obj.review_period_days)
-        return None
+        return obj.review_period_end_date
 
 
 class BountySolutionSerializer(serializers.ModelSerializer):
@@ -54,6 +57,7 @@ class DynamicBountySerializer(DynamicModelFieldSerializer):
     user_vote = serializers.SerializerMethodField()
     metrics = serializers.SerializerMethodField()
     review_period_end_date = serializers.SerializerMethodField()
+    review_period_days = serializers.SerializerMethodField()
     # Kobe: This is not great. This alias is used to disambiguate "parent" used in
     # contribution_views because simply using parent, may lead to infinite
     # recursive loop -_-
@@ -186,9 +190,11 @@ class DynamicBountySerializer(DynamicModelFieldSerializer):
         return None
 
     def get_review_period_end_date(self, bounty):
-        if bounty.status == 'REVIEW_PERIOD' and bounty.expiration_date:
-            return bounty.expiration_date + timedelta(days=bounty.review_period_days)
-        return None
+        return bounty.review_period_end_date
+    
+    def get_review_period_days(self, bounty):
+        from django.conf import settings
+        return settings.BOUNTY_REVIEW_PERIOD_DAYS
 
 
 class DynamicBountySolutionSerializer(DynamicModelFieldSerializer):

@@ -10,13 +10,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name="bounty",
-            name="review_period_days",
-            field=models.IntegerField(
-                default=10, help_text="Days after expiration to review and award bounty"
-            ),
-        ),
         migrations.AlterField(
             model_name="bounty",
             name="status",
